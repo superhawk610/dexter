@@ -176,7 +176,15 @@ defmodule Dexter.Formatter do
         :line_length,
         :normalize_bitstring_modifiers,
         :normalize_charlists_as_sigils,
-        :force_do_end_blocks
+        :force_do_end_blocks,
+        # Phoenix.LiveView.HTMLFormatter
+        :heex_line_length,
+        :attribute_formatters,
+        :migrate_eex_to_curly_interpolation,
+        :inline_matcher,
+        # CanonicalTailwind
+        :canonical_tailwind
+        # ---
       ])
       |> Keyword.put(:locals_without_parens, all_locals_without_parens)
 
