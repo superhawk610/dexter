@@ -1753,6 +1753,21 @@ func (s *Server) Completion(ctx context.Context, params *protocol.CompletionPara
 		}
 	}
 
+	// avoid replacing `do` with `defoverridable`
+	// why this completion?: https://github.com/elixir-lsp/elixir-ls/pull/593
+	// why preselect?:       https://github.com/elixir-lsp/elixir-ls/issues/630
+	// elixir-ls impl:       https://github.com/elixir-lsp/elixir-ls/blob/a9a26f4f7c21b0b6fd0e55084a7b5bd628caf78e/apps/language_server/lib/language_server/providers/completion.ex#L325-L359
+	if strings.HasPrefix(prefix, "d") && !afterDot {
+		items = append(items, protocol.CompletionItem{
+			Label:            "do",
+			Kind:             protocol.CompletionItemKindKeyword,
+			Detail:           "keyword",
+			InsertText:       "do\n  $0\nend",
+			InsertTextFormat: protocol.InsertTextFormatSnippet,
+			Preselect:        true,
+		})
+	}
+
 	if len(items) == 0 {
 		return nil, nil
 	}
