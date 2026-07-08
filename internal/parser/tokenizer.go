@@ -222,13 +222,13 @@ func tokenizeUntil(source, terminator []byte) (int, int, TokenResult) {
 				startLine := line
 				i += 3 // consume opening """
 				// scan to closing """ on its own line
-				i, line = scanHeredocContent(source, i, line, '"', &lineStarts)
+				i, line = scanHeredocContent(source, i, line, '"', &lineStarts, &tokens)
 				tokens = append(tokens, Token{Kind: TokHeredoc, Start: start, End: i, Line: startLine})
 			} else {
 				start := i
 				startLine := line
 				i++ // consume opening "
-				i, line = scanStringContent(source, i, line, '"', &lineStarts)
+				i, line = scanStringContent(source, i, line, '"', &lineStarts, &tokens)
 				tokens = append(tokens, Token{Kind: TokString, Start: start, End: i, Line: startLine})
 			}
 
@@ -238,13 +238,13 @@ func tokenizeUntil(source, terminator []byte) (int, int, TokenResult) {
 				start := i
 				startLine := line
 				i += 3 // consume opening '''
-				i, line = scanHeredocContent(source, i, line, '\'', &lineStarts)
+				i, line = scanHeredocContent(source, i, line, '\'', &lineStarts, &tokens)
 				tokens = append(tokens, Token{Kind: TokHeredoc, Start: start, End: i, Line: startLine})
 			} else {
 				start := i
 				startLine := line
 				i++ // consume opening '
-				i, line = scanStringContent(source, i, line, '\'', &lineStarts)
+				i, line = scanStringContent(source, i, line, '\'', &lineStarts, &tokens)
 				tokens = append(tokens, Token{Kind: TokString, Start: start, End: i, Line: startLine})
 			}
 
@@ -268,14 +268,14 @@ func tokenizeUntil(source, terminator []byte) (int, int, TokenResult) {
 				start := i
 				startLine := line
 				i += 2 // consume :"
-				i, line = scanStringContent(source, i, line, '"', &lineStarts)
+				i, line = scanStringContent(source, i, line, '"', &lineStarts, &tokens)
 				tokens = append(tokens, Token{Kind: TokAtom, Start: start, End: i, Line: startLine})
 			} else if i+1 < len(source) && source[i+1] == '\'' {
 				// Atom with quoted charlist: :'...'
 				start := i
 				startLine := line
 				i += 2 // consume :'
-				i, line = scanStringContent(source, i, line, '\'', &lineStarts)
+				i, line = scanStringContent(source, i, line, '\'', &lineStarts, &tokens)
 				tokens = append(tokens, Token{Kind: TokAtom, Start: start, End: i, Line: startLine})
 			} else if i+1 < len(source) && (isLower(source[i+1]) || source[i+1] == '_' || isUpperAtomStart(source, i+1)) {
 				start := i
@@ -562,7 +562,7 @@ func tokenizeUntil(source, terminator []byte) (int, int, TokenResult) {
 // scanStringContent scans from after the opening delimiter to (and including) the matching closing delimiter.
 // Returns the new position (after closing delimiter) and updated line count.
 // Handles escape sequences and #{} interpolation with proper brace depth tracking.
-func scanStringContent(source []byte, i, line int, delim byte, lineStarts *[]int) (int, int) {
+func scanStringContent(source []byte, i, line int, delim byte, lineStarts *[]int, tokens *[]Token) (int, int) {
 	for i < len(source) {
 		ch := source[i]
 		if ch == '\n' {
@@ -577,7 +577,7 @@ func scanStringContent(source []byte, i, line int, delim byte, lineStarts *[]int
 			i += 2 // skip backslash and next char
 		} else if ch == '#' && i+1 < len(source) && source[i+1] == '{' {
 			i += 2 // consume #{
-			i, line = scanInterpolation(source, i, line, lineStarts)
+			i, line = scanInterpolation(source, i, line, lineStarts, tokens)
 		} else if ch == delim {
 			i++ // consume closing delimiter
 			return i, line
@@ -591,57 +591,29 @@ func scanStringContent(source []byte, i, line int, delim byte, lineStarts *[]int
 // scanInterpolation scans the body of a #{} interpolation block, starting after the #{.
 // Tracks brace depth and properly handles nested strings, char literals, and sigils
 // so that } inside those constructs doesn't prematurely close the interpolation.
-func scanInterpolation(source []byte, i, line int, lineStarts *[]int) (int, int) {
-	depth := 1
-	for i < len(source) && depth > 0 {
-		c := source[i]
-		switch {
-		case c == '\n':
-			line++
-			i++
-			*lineStarts = append(*lineStarts, i)
-		case c == '\\' && i+1 < len(source):
-			if source[i+1] == '\n' {
-				line++
-				*lineStarts = append(*lineStarts, i+2)
-			}
-			i += 2
-		case c == '"' || c == '\'':
-			innerDelim := c
-			i++
-			i, line = scanStringContent(source, i, line, innerDelim, lineStarts)
-		case c == '?' && i+1 < len(source):
-			i++ // consume '?'
-			if source[i] == '\\' && i+1 < len(source) {
-				if source[i+1] == '\n' {
-					line++
-					*lineStarts = append(*lineStarts, i+2)
-				}
-				i += 2 // escape sequence like ?\n
-			} else {
-				i++ // single char like ?} or ?a
-			}
-		case c == '~' && i+1 < len(source) && isLetter(source[i+1]):
-			i, line = scanSigil(source, i, line, lineStarts, nil)
-		case c == '#' && i+1 < len(source) && source[i+1] == '{':
-			i += 2
-			i, line = scanInterpolation(source, i, line, lineStarts)
-		case c == '{':
-			depth++
-			i++
-		case c == '}':
-			depth--
-			i++
-		default:
-			i++
+func scanInterpolation(source []byte, i, line int, lineStarts *[]int, tokens *[]Token) (int, int) {
+	start := i
+	startLine := line
+
+	i_, line_, result := tokenizeUntil(source[start:], []byte("}"))
+	for _, t := range result.Tokens {
+		if t.Kind != TokEOF {
+			*tokens = append(*tokens, Token{Kind: t.Kind, Start: t.Start + start, End: t.End + start, Line: t.Line + startLine - 1})
 		}
 	}
+	for lineStart := range result.LineStarts[1:] {
+		*lineStarts = append(*lineStarts, lineStart+start)
+	}
+
+	i += i_ + 1
+	line += line_ - 1
+
 	return i, line
 }
 
 // scanHeredocContent scans from after the opening """ (or ”') to (and including) the closing """ on its own line.
 // The closing delimiter must appear at the start of a line (possibly with leading whitespace).
-func scanHeredocContent(source []byte, i, line int, delim byte, lineStarts *[]int) (int, int) {
+func scanHeredocContent(source []byte, i, line int, delim byte, lineStarts *[]int, tokens *[]Token) (int, int) {
 	for i < len(source) {
 		ch := source[i]
 		if ch == '\n' {
@@ -665,7 +637,7 @@ func scanHeredocContent(source []byte, i, line int, delim byte, lineStarts *[]in
 			i += 2
 		} else if ch == '#' && i+1 < len(source) && source[i+1] == '{' {
 			i += 2
-			i, line = scanInterpolation(source, i, line, lineStarts)
+			i, line = scanInterpolation(source, i, line, lineStarts, tokens)
 		} else {
 			i++
 		}
@@ -709,7 +681,7 @@ func scanSigil(source []byte, i, line int, lineStarts *[]int, tokens *[]Token) (
 		i += 3 // consume """
 		contentsStart = i
 		if escapes {
-			i, line = scanHeredocContent(source, i, line, '"', lineStarts)
+			i, line = scanHeredocContent(source, i, line, '"', lineStarts, tokens)
 		} else {
 			i, line = scanRawHeredocContent(source, i, line, '"', lineStarts)
 		}
@@ -718,7 +690,7 @@ func scanSigil(source []byte, i, line int, lineStarts *[]int, tokens *[]Token) (
 		i += 3 // consume '''
 		contentsStart = i
 		if escapes {
-			i, line = scanHeredocContent(source, i, line, '\'', lineStarts)
+			i, line = scanHeredocContent(source, i, line, '\'', lineStarts, tokens)
 		} else {
 			i, line = scanRawHeredocContent(source, i, line, '\'', lineStarts)
 		}
@@ -821,9 +793,11 @@ func scanSigil(source []byte, i, line int, lineStarts *[]int, tokens *[]Token) (
 }
 
 func scanSigilContents(sigilChars string, source []byte, start, end, contentsStart, contentsEnd, line int, lineStarts *[]int, tokens *[]Token) {
+	// always emit a token for the sigil
+	*tokens = append(*tokens, Token{Kind: TokSigil, Start: start, End: end, Line: line})
+
 	// only scan the contents of HEEX `~H` sigils
 	if sigilChars != "H" {
-		*tokens = append(*tokens, Token{Kind: TokSigil, Start: start, End: end, Line: line})
 		return
 	}
 
