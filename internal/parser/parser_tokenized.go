@@ -648,7 +648,7 @@ func parseTextFromTokens(path string, source []byte, tokens []Token) ([]Definiti
 
 		case TokIdent:
 			cm := currentModule()
-			if cm != "" && len(injectors) > 0 {
+			if cm != "" {
 				isHEEXFunction := i > 1 && tokens[i-1].Kind == TokDot &&
 					(tokens[i-2].Kind == TokHEEXOpenTag || tokens[i-2].Kind == TokHEEXCloseTag)
 				if isHEEXFunction {
@@ -658,33 +658,35 @@ func parseTextFromTokens(path string, source []byte, tokens []Token) ([]Definiti
 					continue
 				}
 
-				isStatementStart := i == 0 || tokens[i-1].Kind == TokEOL || tokens[i-1].Kind == TokComment
-				if isStatementStart {
-					name := tokenText(tok)
-					if !elixirKeyword[name] {
-						emit := false
-						j := i + 1
-						if j < n {
-							switch tokens[j].Kind {
-							case TokDo:
-								// macro_name do
-								emit = true
-							case TokOpenParen:
-								// macro_name(...)
-								emit = true
-							case TokAtom:
-								// macro_name :atom
-								emit = true
-							default:
-								// Scan forward to see if a block-opening `do` follows the
-								// arguments, respecting bracket depth and statement boundaries.
-								_, _, hasDo := ScanForwardToMacroCallBlockDo(tokens, n, j)
-								emit = hasDo
+				if len(injectors) > 0 {
+					isStatementStart := i == 0 || tokens[i-1].Kind == TokEOL || tokens[i-1].Kind == TokComment
+					if isStatementStart {
+						name := tokenText(tok)
+						if !elixirKeyword[name] {
+							emit := false
+							j := i + 1
+							if j < n {
+								switch tokens[j].Kind {
+								case TokDo:
+									// macro_name do
+									emit = true
+								case TokOpenParen:
+									// macro_name(...)
+									emit = true
+								case TokAtom:
+									// macro_name :atom
+									emit = true
+								default:
+									// Scan forward to see if a block-opening `do` follows the
+									// arguments, respecting bracket depth and statement boundaries.
+									_, _, hasDo := ScanForwardToMacroCallBlockDo(tokens, n, j)
+									emit = hasDo
+								}
 							}
-						}
-						if emit {
-							for mod := range injectors {
-								refs = append(refs, Reference{Module: mod, Function: name, Line: tok.Line, FilePath: path, Kind: "call"})
+							if emit {
+								for mod := range injectors {
+									refs = append(refs, Reference{Module: mod, Function: name, Line: tok.Line, FilePath: path, Kind: "call"})
+								}
 							}
 						}
 					}
