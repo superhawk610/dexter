@@ -2223,6 +2223,19 @@ TokCloseParen (44:45) ")"
 TokCloseParen (45:46) ")"
 TokEOF (50:50)
 `},
+		{"<div {dyn_attrs()}></div>", `TokHEEXOpenTag (0:1)
+TokIdent (6:15) "dyn_attrs"
+TokOpenParen (15:16) "("
+TokCloseParen (16:17) ")"
+TokHEEXCloseTag (19:21)
+TokEOF (25:25)
+`},
+		{"<div {dyn_attrs()} />", `TokHEEXOpenTag (0:1)
+TokIdent (6:15) "dyn_attrs"
+TokOpenParen (15:16) "("
+TokCloseParen (16:17) ")"
+TokEOF (21:21)
+`},
 	}
 
 	for _, tt := range tests {
