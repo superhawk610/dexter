@@ -249,7 +249,7 @@ func tokenizeUntil(source, opener, terminator []byte) (int, int, TokenResult) {
 				startLine := line
 				i += 3 // consume opening """
 				// scan to closing """ on its own line
-				i, line = scanHeredocContent(source, i, line, '"', &lineStarts, &tokens)
+				i, line, _ = scanHeredocContent(source, i, line, '"', &lineStarts, &tokens)
 				tokens = append(tokens, Token{Kind: TokHeredoc, Start: start, End: i, Line: startLine})
 			} else {
 				start := i
@@ -265,7 +265,7 @@ func tokenizeUntil(source, opener, terminator []byte) (int, int, TokenResult) {
 				start := i
 				startLine := line
 				i += 3 // consume opening '''
-				i, line = scanHeredocContent(source, i, line, '\'', &lineStarts, &tokens)
+				i, line, _ = scanHeredocContent(source, i, line, '\'', &lineStarts, &tokens)
 				tokens = append(tokens, Token{Kind: TokHeredoc, Start: start, End: i, Line: startLine})
 			} else {
 				start := i
@@ -639,8 +639,9 @@ func scanInterpolation(source []byte, i, line int, lineStarts *[]int, tokens *[]
 }
 
 // scanHeredocContent scans from after the opening """ (or ”') to (and including) the closing """ on its own line.
-// The closing delimiter must appear at the start of a line (possibly with leading whitespace).
-func scanHeredocContent(source []byte, i, line int, delim byte, lineStarts *[]int, tokens *[]Token) (int, int) {
+// The closing delimiter must appear at the start of a line (possibly with leading whitespace). Returns `true` if
+// the closing delimiter appeared in full and was consumed.
+func scanHeredocContent(source []byte, i, line int, delim byte, lineStarts *[]int, tokens *[]Token) (int, int, bool) {
 	for i < len(source) {
 		ch := source[i]
 		if ch == '\n' {
@@ -654,7 +655,7 @@ func scanHeredocContent(source []byte, i, line int, delim byte, lineStarts *[]in
 			}
 			if j+2 < len(source) && source[j] == delim && source[j+1] == delim && source[j+2] == delim {
 				i = j + 3 // consume closing delimiter
-				return i, line
+				return i, line, true
 			}
 		} else if ch == '\\' && i+1 < len(source) {
 			if source[i+1] == '\n' {
@@ -669,7 +670,7 @@ func scanHeredocContent(source []byte, i, line int, delim byte, lineStarts *[]in
 			i++
 		}
 	}
-	return i, line
+	return i, line, false
 }
 
 // scanSigil scans from the start of a sigil to its closing delimiter, including any trailing
@@ -707,27 +708,38 @@ func scanSigil(source []byte, i, line int, lineStarts *[]int, tokens *[]Token) (
 	if openCh == '"' && i+2 < len(source) && source[i+1] == '"' && source[i+2] == '"' {
 		i += 3 // consume """
 		contentsStart = i
+		var terminated bool
 		if escapes {
-			i, line = scanHeredocContent(source, i, line, '"', lineStarts, tokens)
+			i, line, terminated = scanHeredocContent(source, i, line, '"', lineStarts, tokens)
 		} else {
-			i, line = scanRawHeredocContent(source, i, line, '"', lineStarts)
+			i, line, terminated = scanRawHeredocContent(source, i, line, '"', lineStarts)
 		}
-		contentsEnd = i - 3
+		if terminated {
+			contentsEnd = i - 3
+		} else {
+			contentsEnd = i
+		}
 	} else if openCh == '\'' && i+2 < len(source) && source[i+1] == '\'' && source[i+2] == '\'' {
 		i += 3 // consume '''
 		contentsStart = i
+		var terminated bool
 		if escapes {
-			i, line = scanHeredocContent(source, i, line, '\'', lineStarts, tokens)
+			i, line, terminated = scanHeredocContent(source, i, line, '\'', lineStarts, tokens)
 		} else {
-			i, line = scanRawHeredocContent(source, i, line, '\'', lineStarts)
+			i, line, terminated = scanRawHeredocContent(source, i, line, '\'', lineStarts)
 		}
-		contentsEnd = i - 3
+		if terminated {
+			contentsEnd = i - 3
+		} else {
+			contentsEnd = i
+		}
 	} else {
 		i++ // consume opening delimiter
 		contentsStart = i
 
 		var closeCh byte
 		nested := false
+		terminated := false
 
 		switch openCh {
 		case '(':
@@ -771,6 +783,7 @@ func scanSigil(source []byte, i, line int, lineStarts *[]int, tokens *[]Token) (
 					i++
 				}
 			}
+			terminated = depth == 0
 		} else {
 			for i < len(source) {
 				ch := source[i]
@@ -786,6 +799,7 @@ func scanSigil(source []byte, i, line int, lineStarts *[]int, tokens *[]Token) (
 					i += 2
 				} else if ch == closeCh {
 					i++ // consume closing delimiter
+					terminated = true
 					break
 				} else {
 					i++
@@ -793,17 +807,15 @@ func scanSigil(source []byte, i, line int, lineStarts *[]int, tokens *[]Token) (
 			}
 		}
 
-		contentsEnd = i - 1
-
-		// Consume trailing modifier letters (e.g. the 'i' in ~r/foo/i)
-		for i < len(source) && isLetter(source[i]) {
-			i++
+		if terminated {
+			contentsEnd = i - 1
+			// Consume trailing modifier letters (e.g. the 'i' in ~r/foo/i)
+			for i < len(source) && isLetter(source[i]) {
+				i++
+			}
+		} else {
+			contentsEnd = i
 		}
-	}
-
-	// incomplete sigil at end of document
-	if contentsEnd < contentsStart {
-		return i, line
 	}
 
 	// emit tokens if requested
@@ -1109,7 +1121,8 @@ func TokenizeHeex(source []byte) TokenResult {
 
 // scanRawHeredocContent scans a heredoc body where backslash is NOT an escape character
 // (used by uppercase sigils like ~S"""). Only tracks newlines and looks for closing delimiter.
-func scanRawHeredocContent(source []byte, i, line int, delim byte, lineStarts *[]int) (int, int) {
+// Returns true if the closing delimiter appeared and was consumed in full.
+func scanRawHeredocContent(source []byte, i, line int, delim byte, lineStarts *[]int) (int, int, bool) {
 	for i < len(source) {
 		ch := source[i]
 		if ch == '\n' {
@@ -1122,13 +1135,13 @@ func scanRawHeredocContent(source []byte, i, line int, delim byte, lineStarts *[
 			}
 			if j+2 < len(source) && source[j] == delim && source[j+1] == delim && source[j+2] == delim {
 				i = j + 3
-				return i, line
+				return i, line, true
 			}
 		} else {
 			i++
 		}
 	}
-	return i, line
+	return i, line, false
 }
 
 // isLetter returns true for ASCII [a-zA-Z].

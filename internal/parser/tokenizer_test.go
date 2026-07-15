@@ -696,13 +696,20 @@ func TestTokenize_UnterminatedHeredoc(t *testing.T) {
 }
 
 func TestTokenize_UnterminatedSigil(t *testing.T) {
-	source := "~r(pattern"
-	tokens := Tokenize([]byte(source))
-	if tokens[len(tokens)-1].Kind != TokEOF {
-		t.Error("expected TokEOF at end")
+	tests := []string{
+		"~r(pattern",
+		"~H\"\"\"",
+		"~H\"",
+		"~H[",
 	}
-	if tokens[0].Kind != TokSigil {
-		t.Errorf("token[0] = %s, want TokSigil", kindName(tokens[0].Kind))
+	for _, source := range tests {
+		tokens := Tokenize([]byte(source))
+		if tokens[len(tokens)-1].Kind != TokEOF {
+			t.Error("expected TokEOF at end")
+		}
+		if tokens[0].Kind != TokSigil {
+			t.Errorf("token[0] = %s, want TokSigil", kindName(tokens[0].Kind))
+		}
 	}
 }
 
