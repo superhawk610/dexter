@@ -143,10 +143,7 @@ func (tn *TreeNode) EndPosition() tree_sitter.Point {
 // Utf8Text returns the UTF-8 encoded string representation of the given node
 // within the top-most root tree.
 func (tn *TreeNode) Utf8Text(src []byte) string {
-	if tn.Tree.Root == nil {
-		return tn.Node.Utf8Text(src)
-	}
-	return tn.Tree.Root.Utf8Text(src)[tn.Node.StartByte():tn.Node.EndByte()]
+	return string(src[tn.StartByte():tn.EndByte()])
 }
 
 // ContainsPosition returns true if the node contains the given position
