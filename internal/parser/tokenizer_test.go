@@ -2199,6 +2199,23 @@ TokEOF (54:54)
 TokString (12:16) "\"{}\""
 TokEOF (20:20)
 `},
+		{"<div attr={choose(%{}, SharedLib.Worker.run())} />", `TokHEEXOpenTag (0:1)
+TokIdent (11:17) "choose"
+TokOpenParen (17:18) "("
+TokPercent (18:19) "%"
+TokOpenBrace (19:20)
+TokCloseBrace (20:21)
+TokComma (21:22) ","
+TokModule (23:32) "SharedLib"
+TokDot (32:33)
+TokModule (33:39) "Worker"
+TokDot (39:40)
+TokIdent (40:43) "run"
+TokOpenParen (43:44) "("
+TokCloseParen (44:45) ")"
+TokCloseParen (45:46) ")"
+TokEOF (50:50)
+`},
 	}
 
 	for _, tt := range tests {

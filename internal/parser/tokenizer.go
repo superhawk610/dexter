@@ -138,30 +138,57 @@ func Tokenize(source []byte) []Token {
 }
 
 func TokenizeFull(source []byte) TokenResult {
-	_, _, result := tokenizeUntil(source, nil)
+	_, _, result := tokenizeUntil(source, nil, nil)
 	return result
 }
 
 // tokenizeUntil tokenizes the given source until the given terminator is reached
 // in a non-ignored context (ignored when it appears within a comment or string literal).
-// Returns the byte offset and line number that tokenizing stopped along with the token result.
-func tokenizeUntil(source, terminator []byte) (int, int, TokenResult) {
-	tokens := make([]Token, 0, len(source)/8)
-	lineStarts := make([]int, 1, 64)
+// If an opener sequence is provided, nested opener/terminator pairs will be ignored, e.g.
+// open/close curly braces. Returns the byte offset and line number that tokenizing
+// stopped along with the token result.
+func tokenizeUntil(source, opener, terminator []byte) (int, int, TokenResult) {
+	tokenCapacity := len(source) / 8
+	lineCapacity := 64
+	if terminator != nil {
+		// use a smaller initial capacity when scanning for a terminator, since the typical
+		// case is tokenizing a small expression within an interpolation
+		tokenCapacity = 16
+		lineCapacity = 8
+
+		if bytes.ContainsRune(terminator, '\n') {
+			panic("Terminator may not contain newline")
+		}
+	}
+	if opener != nil && bytes.ContainsRune(opener, '\n') {
+		panic("Opener may not contain newline")
+	}
+
+	tokens := make([]Token, 0, tokenCapacity)
+	lineStarts := make([]int, 1, lineCapacity)
 	lineStarts[0] = 0 // line 1 starts at byte 0
 	line := 1
 	i := 0
+	nestingLevel := 0
 	afterDot := false // true when the last significant token was TokDot
 
 	for i < len(source) {
 		ch := source[i]
 
+		if opener != nil && bytes.HasPrefix(source[i:], opener) {
+			nestingLevel++
+		}
+
+		if terminator != nil && bytes.HasPrefix(source[i:], terminator) {
+			if nestingLevel == 0 {
+				return i, line, TokenResult{Tokens: tokens, LineStarts: lineStarts}
+			}
+			nestingLevel--
+		}
+
 		// Whitespace, newlines, and comments don't affect afterDot — they preserve it.
 		// Everything else clears it (except the dot case which sets it).
 		switch {
-		case terminator != nil && bytes.HasPrefix(source[i:], terminator):
-			return i, line, TokenResult{Tokens: tokens, LineStarts: lineStarts}
-
 		case ch == '\n':
 			tokens = append(tokens, Token{Kind: TokEOL, Start: i, End: i + 1, Line: line})
 			line++
@@ -595,7 +622,7 @@ func scanInterpolation(source []byte, i, line int, lineStarts *[]int, tokens *[]
 	start := i
 	startLine := line
 
-	i_, line_, result := tokenizeUntil(source[start:], []byte("}"))
+	i_, line_, result := tokenizeUntil(source[start:], []byte("{"), []byte("}"))
 	for _, t := range result.Tokens {
 		if t.Kind != TokEOF {
 			*tokens = append(*tokens, Token{Kind: t.Kind, Start: t.Start + start, End: t.End + start, Line: t.Line + startLine - 1})
@@ -832,12 +859,17 @@ func TokenizeHeex(source []byte) TokenResult {
 		return i, line
 	}
 
-	scanInterpolation := func(i, line int, terminator string, tokens *[]Token) (int, int) {
+	scanInterpolation := func(i, line int, opener, terminator string, tokens *[]Token) (int, int) {
 		start := i
 		startLine := line
 
+		var opener_ []byte
+		if opener != "" {
+			opener_ = []byte(opener)
+		}
+
 		// lineStarts has already been updated during heredoc scanning
-		i_, line_, result := tokenizeUntil(source[start:], []byte(terminator))
+		i_, line_, result := tokenizeUntil(source[start:], opener_, []byte(terminator))
 		for _, t := range result.Tokens {
 			if t.Kind != TokEOF {
 				*tokens = append(*tokens, Token{Kind: t.Kind, Start: t.Start + start, End: t.End + start, Line: t.Line + startLine - 1})
@@ -933,7 +965,7 @@ func TokenizeHeex(source []byte) TokenResult {
 
 			case ch == '{':
 				i++
-				return scanInterpolation(i, line, "}", tokens)
+				return scanInterpolation(i, line, "{", "}", tokens)
 
 			case ch == '>':
 				return i, line
@@ -972,6 +1004,11 @@ func TokenizeHeex(source []byte) TokenResult {
 			case source[i] == ':':
 				i++
 				i, line = scanTagAttr(i, line, lineStarts, tokens)
+
+			// dynamic attributes "<div {dynamic_attrs()}"
+			case source[i] == '{':
+				i++
+				i, line = scanInterpolation(i, line, "{", "}", tokens)
 
 			// self-closing tag
 			case source[i] == '/':
@@ -1035,7 +1072,8 @@ func TokenizeHeex(source []byte) TokenResult {
 						}
 						// EEX interpolation "<%"
 						// EEX special form "<% for", "<% if", "<% case", "<% cond", "<% else", "<% end", "<% _ ->"
-						i, line = scanInterpolation(i, line, "%>", &tokens)
+						// NOTE: nested <% %> are not supported, so don't pass an opener sequence to `scanInterpolation`
+						i, line = scanInterpolation(i, line, "", "%>", &tokens)
 					}
 				} else if source[i] == '/' {
 					i++
@@ -1055,7 +1093,7 @@ func TokenizeHeex(source []byte) TokenResult {
 		case ch == '{':
 			// HEEX interpolation "{"
 			i++
-			i, line = scanInterpolation(i, line, "}", &tokens)
+			i, line = scanInterpolation(i, line, "{", "}", &tokens)
 
 		default:
 			i++
