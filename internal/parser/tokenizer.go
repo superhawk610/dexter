@@ -3,6 +3,7 @@ package parser
 import (
 	"bytes"
 	"fmt"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -138,7 +139,7 @@ func Tokenize(source []byte) []Token {
 }
 
 func TokenizeFull(source []byte) TokenResult {
-	_, _, result := tokenizeUntil(source, nil, nil)
+	_, _, _, result := tokenizeUntil(source, nil, nil)
 	return result
 }
 
@@ -146,8 +147,9 @@ func TokenizeFull(source []byte) TokenResult {
 // in a non-ignored context (ignored when it appears within a comment or string literal).
 // If an opener sequence is provided, nested opener/terminator pairs will be ignored, e.g.
 // open/close curly braces. Returns the byte offset and line number that tokenizing
-// stopped along with the token result.
-func tokenizeUntil(source, opener, terminator []byte) (int, int, TokenResult) {
+// stopped along with the token result. Returns `true` if the provided terminator
+// appeared and was consumed.
+func tokenizeUntil(source, opener, terminator []byte) (int, int, bool, TokenResult) {
 	tokenCapacity := len(source) / 8
 	lineCapacity := 64
 	if terminator != nil {
@@ -181,7 +183,7 @@ func tokenizeUntil(source, opener, terminator []byte) (int, int, TokenResult) {
 
 		if terminator != nil && bytes.HasPrefix(source[i:], terminator) {
 			if nestingLevel == 0 {
-				return i, line, TokenResult{Tokens: tokens, LineStarts: lineStarts}
+				return i, line, true, TokenResult{Tokens: tokens, LineStarts: lineStarts}
 			}
 			nestingLevel--
 		}
@@ -583,7 +585,7 @@ func tokenizeUntil(source, opener, terminator []byte) (int, int, TokenResult) {
 	}
 
 	tokens = append(tokens, Token{Kind: TokEOF, Start: len(source), End: len(source), Line: line})
-	return i, line, TokenResult{Tokens: tokens, LineStarts: lineStarts}
+	return i, line, false, TokenResult{Tokens: tokens, LineStarts: lineStarts}
 }
 
 // scanStringContent scans from after the opening delimiter to (and including) the matching closing delimiter.
@@ -622,7 +624,7 @@ func scanInterpolation(source []byte, i, line int, lineStarts *[]int, tokens *[]
 	start := i
 	startLine := line
 
-	i_, line_, result := tokenizeUntil(source[start:], []byte("{"), []byte("}"))
+	i_, line_, terminated, result := tokenizeUntil(source[start:], []byte("{"), []byte("}"))
 	for _, t := range result.Tokens {
 		if t.Kind != TokEOF {
 			*tokens = append(*tokens, Token{Kind: t.Kind, Start: t.Start + start, End: t.End + start, Line: t.Line + startLine - 1})
@@ -632,8 +634,13 @@ func scanInterpolation(source []byte, i, line int, lineStarts *[]int, tokens *[]
 		*lineStarts = append(*lineStarts, lineStart+start)
 	}
 
-	i += i_ + 1
+	i += i_
 	line += line_ - 1
+
+	// consume terminator, if it was encountered
+	if terminated {
+		i++
+	}
 
 	return i, line
 }
@@ -849,6 +856,71 @@ func scanSigilContents(sigilChars string, source []byte, start, end, contentsSta
 	}
 }
 
+// A HEEX tag encountered during tokenization.
+type heexTag struct {
+	// The tag's name, e.g. `div`, `.bar`, or `Foo.bar`.
+	Name []byte
+	// Whether the tag is self-closing; when `false`, a matching closing tag
+	// is likely expected to be present somewhere later in the source.
+	SelfClosing bool
+	// Whether {..} interpolation is enabled within this tag's descendents
+	// (the `phx-no-curly-interpolation` attribute is set). This has no effect
+	// on self-closing tags, since they have no descendents.
+	NoInterpolate bool
+}
+
+type heexTagStackNode struct {
+	tag         *heexTag
+	interpolate bool
+}
+
+// A stack of HEEX tags representing all ancestor nodes to the node currently being tokenized.
+// Useful for tracking whether {..} curly interpolation is currently enabled, as disabling it
+// on a single tag disables it for all of that tag's descendents.
+type heexTagStack struct {
+	tags []heexTagStackNode
+}
+
+// Create an empty HEEX tag stack. Curly interpolation is enabled by default in the root.
+func newHeexTagStack() *heexTagStack {
+	return &heexTagStack{
+		tags: make([]heexTagStackNode, 0, 8),
+	}
+}
+
+func (s *heexTagStack) current() *heexTagStackNode {
+	if len(s.tags) == 0 {
+		return nil
+	}
+	return &s.tags[len(s.tags)-1]
+}
+
+// Whether {..} curly brace interpolation is currently enabled in the stack.
+func (s *heexTagStack) curlyInterpolate() bool {
+	if cur := s.current(); cur != nil {
+		return cur.interpolate
+	}
+	return true
+}
+
+// Descend into the given tag.
+func (s *heexTagStack) enter(t *heexTag) {
+	s.tags = append(s.tags, heexTagStackNode{
+		tag:         t,
+		interpolate: s.curlyInterpolate() && !t.NoInterpolate,
+	})
+}
+
+// Move up and out of the given tag. In well-formed HTML, close tags should
+// always match the most recently entered tag. If the HTML is malformed and
+// we encounter a close tag that doesn't correspond to the most recent open
+// tag, we do nothing.
+func (s *heexTagStack) leave(tagName []byte) {
+	if cur := s.current(); cur != nil && slices.Equal(cur.tag.Name, tagName) {
+		s.tags = s.tags[:len(s.tags)-1]
+	}
+}
+
 func TokenizeHeex(source []byte) TokenResult {
 	tokens := make([]Token, 0, len(source)/8)
 	lineStarts := make([]int, 1, 64)
@@ -881,20 +953,25 @@ func TokenizeHeex(source []byte) TokenResult {
 		}
 
 		// lineStarts has already been updated during heredoc scanning
-		i_, line_, result := tokenizeUntil(source[start:], opener_, []byte(terminator))
+		i_, line_, terminated, result := tokenizeUntil(source[start:], opener_, []byte(terminator))
 		for _, t := range result.Tokens {
 			if t.Kind != TokEOF {
 				*tokens = append(*tokens, Token{Kind: t.Kind, Start: t.Start + start, End: t.End + start, Line: t.Line + startLine - 1})
 			}
 		}
 
-		i += i_ + len(terminator)
+		i += i_
 		line += line_ - 1
+
+		if terminated {
+			i += len(terminator)
+		}
 
 		return i, line
 	}
 
-	scanTagName := func(i, line int, tokens *[]Token) (int, int) {
+	scanTagName := func(i, line int, tokens *[]Token) (int, int, []byte) {
+		start := i
 		for i < len(source) {
 			switch {
 			// <.foo
@@ -907,14 +984,14 @@ func TokenizeHeex(source []byte) TokenResult {
 					i++
 				}
 				if i == start {
-					return i, line
+					return i, line, source[start:i]
 				}
 
 				if isUpper(source[start]) {
 					*tokens = append(*tokens, Token{Kind: TokModule, Start: start, End: i, Line: line})
 				} else {
 					*tokens = append(*tokens, Token{Kind: TokIdent, Start: start, End: i, Line: line})
-					return i, line
+					return i, line, source[start:i]
 				}
 
 			// <div OR <Foo.bar
@@ -924,7 +1001,7 @@ func TokenizeHeex(source []byte) TokenResult {
 					i++
 				}
 				if i == start {
-					return i, line
+					return i, line, source[start:i]
 				}
 
 				if i < len(source) && isUpper(source[start]) && source[i] == '.' {
@@ -932,18 +1009,19 @@ func TokenizeHeex(source []byte) TokenResult {
 					*tokens = append(*tokens, Token{Kind: TokModule, Start: start, End: i, Line: line})
 				} else {
 					// otherwise, this is a HTML tag name
-					return i, line
+					return i, line, source[start:i]
 				}
 
 			default:
-				return i, line
+				return i, line, source[start:i]
 			}
 		}
 
-		return i, line
+		return i, line, source[start:i]
 	}
 
-	scanTagAttr := func(i, line int, lineStarts *[]int, tokens *[]Token) (int, int) {
+	scanTagAttr := func(i, line int, lineStarts *[]int, tokens *[]Token) (int, int, []byte) {
+		start := i
 		var quoteChar byte
 		for i < len(source) {
 			ch := source[i]
@@ -956,7 +1034,7 @@ func TokenizeHeex(source []byte) TokenResult {
 				*lineStarts = append(*lineStarts, i)
 
 			case quoteChar == 0 && isWhitespace(ch):
-				return i, line
+				return i, line, source[start:i]
 
 			case quoteChar == 0 && (ch == '\'' || ch == '"'):
 				quoteChar = ch
@@ -970,27 +1048,29 @@ func TokenizeHeex(source []byte) TokenResult {
 
 			case quoteChar != 0 && ch == quoteChar:
 				i++
-				return i, line
+				return i, line, source[start:i]
 
 			case quoteChar != 0:
 				i++
 
 			case ch == '{':
 				i++
-				return scanInterpolation(i, line, "{", "}", tokens)
+				i, line = scanInterpolation(i, line, "{", "}", tokens)
+				return i, line, source[start:i]
 
 			case ch == '>':
-				return i, line
+				return i, line, source[start:i]
 
 			default:
 				i++
 			}
 		}
 
-		return i, line
+		return i, line, source[start:i]
 	}
 
-	scanTag := func(i, line int, lineStarts *[]int, tokens *[]Token) (int, int) {
+	scanTag := func(i, line int, lineStarts *[]int, tokens *[]Token) (int, int, heexTag) {
+		t := heexTag{}
 		hasName := false
 		for i < len(source) {
 			switch {
@@ -1005,17 +1085,21 @@ func TokenizeHeex(source []byte) TokenResult {
 
 			// HTML tag name, function, or module/function
 			case !hasName:
-				i, line = scanTagName(i, line, tokens)
+				i, line, t.Name = scanTagName(i, line, tokens)
 				hasName = true
 
 			// attribute
 			case isLetter(source[i]):
-				i, line = scanTagAttr(i, line, lineStarts, tokens)
+				var attr []byte
+				i, line, attr = scanTagAttr(i, line, lineStarts, tokens)
+				if slices.Equal(attr, []byte("phx-no-curly-interpolation")) {
+					t.NoInterpolate = true
+				}
 
 			// HEEX special attribute ":if={}", ":for={}", ":let={}", ":type={}"
 			case source[i] == ':':
 				i++
-				i, line = scanTagAttr(i, line, lineStarts, tokens)
+				i, line, _ = scanTagAttr(i, line, lineStarts, tokens)
 
 			// dynamic attributes "<div {dynamic_attrs()}"
 			case source[i] == '{':
@@ -1027,21 +1111,29 @@ func TokenizeHeex(source []byte) TokenResult {
 				i++
 				if i < len(source) && source[i] == '>' {
 					i++
-					return i, line
+					t.SelfClosing = true
+					return i, line, t
 				}
 
 			// finish open tag
 			case source[i] == '>':
 				i++
-				return i, line
+				return i, line, t
 
 			default:
 				i++
 			}
 		}
 
-		return i, line
+		return i, line, t
 	}
+
+	tagStack := newHeexTagStack()
+
+	// Tokenization is disabled within <script>/<style> tags; this tracks the exact sequence that
+	// we must encounter, e.g. "</script>", to resume tokenizing. No whitespace or newlines are
+	// allowed within the close tag, so we can match on an exact byte sequence.
+	var skipUntilCloseTag []byte
 
 	for i < len(source) {
 		ch := source[i]
@@ -1055,6 +1147,26 @@ func TokenizeHeex(source []byte) TokenResult {
 
 		case isWhitespace(ch):
 			i++
+
+		case skipUntilCloseTag != nil:
+			if bytes.HasPrefix(source[i:], skipUntilCloseTag) {
+				tokens = append(tokens, Token{Kind: TokHEEXCloseTag, Start: i, End: i + 2, Line: line})
+				i += len(skipUntilCloseTag)
+				// trim off leading "</" and trailing ">"
+				tagStack.leave(skipUntilCloseTag[2 : len(skipUntilCloseTag)-1])
+				skipUntilCloseTag = nil
+				// EEx interpolation (<% .. %> and <%= .. %>) are still active within script/style tags
+			} else if i+1 < len(source) && ch == '<' && source[i+1] == '%' {
+				i += 2
+				// consume "=" output indicator from "<%=" special form prefix
+				if i < len(source) && source[i] == '=' {
+					i++
+				}
+				// NOTE: nested <% %> are not supported, so don't pass an opener sequence to `scanInterpolation`
+				i, line = scanInterpolation(i, line, "", "%>", &tokens)
+			} else {
+				i++
+			}
 
 		case ch == '<':
 			// consume <
@@ -1083,14 +1195,15 @@ func TokenizeHeex(source []byte) TokenResult {
 							i++
 						}
 						// EEX interpolation "<%"
-						// EEX special form "<% for", "<% if", "<% case", "<% cond", "<% else", "<% end", "<% _ ->"
 						// NOTE: nested <% %> are not supported, so don't pass an opener sequence to `scanInterpolation`
 						i, line = scanInterpolation(i, line, "", "%>", &tokens)
 					}
 				} else if source[i] == '/' {
 					i++
 					tokens = append(tokens, Token{Kind: TokHEEXCloseTag, Start: i - 2, End: i, Line: line})
-					i, line = scanTagName(i, line, &tokens)
+					var name []byte
+					i, line, name = scanTagName(i, line, &tokens)
+					tagStack.leave(name)
 					if i < len(source) && source[i] == '>' {
 						i++
 					}
@@ -1098,11 +1211,22 @@ func TokenizeHeex(source []byte) TokenResult {
 					// HTML tag "<div"
 					// HEEX component "<.foo", "<Foo.bar"
 					tokens = append(tokens, Token{Kind: TokHEEXOpenTag, Start: i - 1, End: i, Line: line})
-					i, line = scanTag(i, line, &lineStarts, &tokens)
+
+					var t heexTag
+					i, line, t = scanTag(i, line, &lineStarts, &tokens)
+					if !t.SelfClosing {
+						tagStack.enter(&t)
+					}
+
+					if slices.Equal(t.Name, []byte("script")) {
+						skipUntilCloseTag = []byte("</script>")
+					} else if slices.Equal(t.Name, []byte("style")) {
+						skipUntilCloseTag = []byte("</style>")
+					}
 				}
 			}
 
-		case ch == '{':
+		case tagStack.curlyInterpolate() && ch == '{':
 			// HEEX interpolation "{"
 			i++
 			i, line = scanInterpolation(i, line, "{", "}", &tokens)

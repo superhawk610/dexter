@@ -2236,6 +2236,37 @@ TokOpenParen (15:16) "("
 TokCloseParen (16:17) ")"
 TokEOF (21:21)
 `},
+		{"<div>{foo()}</div>\n<script type=\"text/javascript\">x = 1 < 2; y = {}; z = <%= bar() %></script>", `TokHEEXOpenTag (0:1)
+TokIdent (6:9) "foo"
+TokOpenParen (9:10) "("
+TokCloseParen (10:11) ")"
+TokHEEXCloseTag (12:14)
+TokEOL (18:19)
+TokHEEXOpenTag (19:20)
+TokIdent (77:80) "bar"
+TokOpenParen (80:81) "("
+TokCloseParen (81:82) ")"
+TokHEEXCloseTag (85:87)
+TokEOF (94:94)
+`},
+		{"<style>.foo { color: calc(1 < 2); background: <%= bg() %> }</style>", `TokHEEXOpenTag (0:1)
+TokIdent (50:52) "bg"
+TokOpenParen (52:53) "("
+TokCloseParen (53:54) ")"
+TokHEEXCloseTag (59:61)
+TokEOF (67:67)
+`},
+		{"<div phx-no-curly-interpolation>{foo()}</div>", `TokHEEXOpenTag (0:1)
+TokHEEXCloseTag (39:41)
+TokEOF (45:45)
+`},
+		{"<div attr=\"phx-no-curly-interpolation\">{foo()}</div>", `TokHEEXOpenTag (0:1)
+TokIdent (40:43) "foo"
+TokOpenParen (43:44) "("
+TokCloseParen (44:45) ")"
+TokHEEXCloseTag (46:48)
+TokEOF (52:52)
+`},
 	}
 
 	for _, tt := range tests {
