@@ -1,6 +1,7 @@
 package treesitter
 
 import (
+	"slices"
 	"unsafe"
 
 	tree_sitter_heex "github.com/phoenixframework/tree-sitter-heex/bindings/go"
@@ -213,28 +214,107 @@ func newTree(lang Language, src []byte, parsers map[Language]*tree_sitter.Parser
 		Branches: make(map[uintptr]*Tree),
 	}
 
-	visitTree(trunk.RootNode(), func(node *tree_sitter.Node) {
-		// when visiting Elixir trees, parse nested ~H sigils as HEEX sub-trees
-		if lang == LangElixir &&
-			node.Kind() == "quoted_content" &&
-			node.Parent() != nil && node.Parent().Kind() == "sigil" &&
-			/* sigil_name */ node.PrevNamedSibling() != nil && node.PrevNamedSibling().Utf8Text(src) == "H" {
-			if tree := newTree(LangHeex, src[node.StartByte():node.EndByte()], parsers); tree != nil {
-				tree.Root = &TreeNode{Tree: t, Node: node}
-				t.Branches[node.Id()] = tree
-			}
-		}
-
-		// when visiting HEEX trees, parse nested expressions as Elixir sub-trees
-		if lang == LangHeex && node.Kind() == "expression_value" {
-			if tree := newTree(LangElixir, src[node.StartByte():node.EndByte()], parsers); tree != nil {
-				tree.Root = &TreeNode{Tree: t, Node: node}
-				t.Branches[node.Id()] = tree
-			}
-		}
-	})
+	visitTree(trunk.RootNode(), &parseVisitor{parsers: parsers, src: src, tree: t})
 
 	return t
+}
+
+type parseVisitor struct {
+	parsers map[Language]*tree_sitter.Parser
+	src     []byte
+	tree    *Tree
+	tags    []parseVisitorTag
+}
+
+// See `heexTag` / `heexTagStack` in `tokenizer.go`; this follows the same approach.
+type parseVisitorTag struct {
+	name        []byte
+	interpolate bool
+}
+
+func (v *parseVisitor) currentTag() *parseVisitorTag {
+	if len(v.tags) == 0 {
+		return nil
+	}
+	return &v.tags[len(v.tags)-1]
+}
+
+func (v *parseVisitor) curlyInterpolate() bool {
+	if cur := v.currentTag(); cur != nil {
+		return cur.interpolate
+	}
+	return true
+}
+
+func (v *parseVisitor) onNode(node *tree_sitter.Node) {
+	// When visiting Elixir trees, parse nested ~H sigils as HEEX sub-trees.
+	if v.tree.Language == LangElixir &&
+		node.Kind() == "quoted_content" &&
+		node.Parent() != nil && node.Parent().Kind() == "sigil" &&
+		/* sigil_name */ node.PrevNamedSibling() != nil && node.PrevNamedSibling().Utf8Text(v.src) == "H" {
+		if tree := newTree(LangHeex, v.src[node.StartByte():node.EndByte()], v.parsers); tree != nil {
+			tree.Root = &TreeNode{Tree: v.tree, Node: node}
+			v.tree.Branches[node.Id()] = tree
+		}
+	}
+
+	// When visiting HEEX trees, parse nested expressions as Elixir sub-trees;
+	// EEx directives (<% and <%=) are always parsed, while {..} curly interpolation
+	// is only parsed when enabled by the surrounding context. It's enabled by default
+	// and disabled within <script>/<style> tags and within any tags with the special
+	// `phx-no-curly-interpolation` attribute. Curly interpolation is always enabled
+	// on the tag itself e.g. "<div phx-no-curly-interpolation id={component_id()} />".
+	if v.tree.Language == LangHeex &&
+		node.Kind() == "partial_expression_value" || node.Kind() == "ending_expression_value" ||
+		(node.Kind() == "expression_value" && (node.Parent().Kind() == "directive" || v.curlyInterpolate())) {
+		if tree := newTree(LangElixir, v.src[node.StartByte():node.EndByte()], v.parsers); tree != nil {
+			tree.Root = &TreeNode{Tree: v.tree, Node: node}
+			v.tree.Branches[node.Id()] = tree
+		}
+	}
+}
+
+func (v *parseVisitor) onEnter(node *tree_sitter.Node) {
+	if node.Kind() == "tag" {
+		if startTag := node.NamedChild(0); startTag != nil && startTag.Kind() == "start_tag" {
+			if tagNameNode := startTag.NamedChild(0); tagNameNode != nil {
+				tagName := v.src[tagNameNode.StartByte():tagNameNode.EndByte()]
+				ignoreContents := slices.Equal(tagName, []byte("script")) || slices.Equal(tagName, []byte("style"))
+				hasNoInterpolateAttr := hasAttr(startTag, v.src, []byte("phx-no-curly-interpolation"))
+				interpolate := v.curlyInterpolate() && !ignoreContents && !hasNoInterpolateAttr
+				v.tags = append(v.tags, parseVisitorTag{name: tagName, interpolate: interpolate})
+			}
+		}
+	} else if node.Kind() == "component" {
+		if startComp := node.NamedChild(0); startComp != nil && startComp.Kind() == "start_component" {
+			if compNameNode := startComp.NamedChild(0); compNameNode != nil {
+				compName := v.src[compNameNode.StartByte():compNameNode.EndByte()]
+				hasNoInterpolateAttr := hasAttr(startComp, v.src, []byte("phx-no-curly-interpolation"))
+				interpolate := v.curlyInterpolate() && !hasNoInterpolateAttr
+				v.tags = append(v.tags, parseVisitorTag{name: compName, interpolate: interpolate})
+			}
+		}
+	}
+}
+
+func (v *parseVisitor) onLeave(node *tree_sitter.Node) {
+	if len(v.tags) > 0 && (node.Kind() == "tag" || node.Kind() == "component") {
+		v.tags = v.tags[:len(v.tags)-1]
+	}
+}
+
+// Returns true if the given start_tag/start_component node has the given attribute.
+func hasAttr(node *tree_sitter.Node, src, attr []byte) bool {
+	for i := range node.ChildCount() {
+		if c := node.Child(i); c.Kind() == "attribute" {
+			if an := c.NamedChild(0); an != nil && an.Kind() == "attribute_name" {
+				if slices.Equal(src[an.StartByte():an.EndByte()], attr) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 type Language byte
@@ -279,13 +359,20 @@ func AllParsers() map[Language]*tree_sitter.Parser {
 	return parsers
 }
 
-func visitTree(root *tree_sitter.Node, onNode func(node *tree_sitter.Node)) {
+type visitor interface {
+	onNode(node *tree_sitter.Node)
+	onEnter(node *tree_sitter.Node)
+	onLeave(node *tree_sitter.Node)
+}
+
+func visitTree(root *tree_sitter.Node, v visitor) {
 	cursor := root.Walk()
 	defer cursor.Close()
 
 	for {
 		// visit current node
-		onNode(cursor.Node())
+		v.onEnter(cursor.Node())
+		v.onNode(cursor.Node())
 
 		// traverse down one level, if possible
 		if cursor.GotoFirstChild() {
@@ -295,6 +382,7 @@ func visitTree(root *tree_sitter.Node, onNode func(node *tree_sitter.Node)) {
 		// traverse via siblings, if possible
 		for !cursor.GotoNextSibling() {
 			// move back up and recurse, returning once we're back to the root
+			v.onLeave(cursor.Node())
 			if !cursor.GotoParent() {
 				return
 			}

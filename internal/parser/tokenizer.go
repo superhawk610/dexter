@@ -927,11 +927,9 @@ func (s *heexTagStack) enter(t *heexTag) {
 }
 
 // Move up and out of the given tag. In well-formed HTML, close tags should
-// always match the most recently entered tag. If the HTML is malformed and
-// we encounter a close tag that doesn't correspond to the most recent open
-// tag, we do nothing.
-func (s *heexTagStack) leave(tagName []byte) {
-	if cur := s.current(); cur != nil && slices.Equal(cur.tag.Name, tagName) {
+// always match the most recently entered tag.
+func (s *heexTagStack) leave() {
+	if len(s.tags) > 0 {
 		s.tags = s.tags[:len(s.tags)-1]
 	}
 }
@@ -1172,8 +1170,7 @@ func TokenizeHeex(source []byte) TokenResult {
 			if bytes.HasPrefix(source[i:], skipUntilCloseTag) {
 				tokens = append(tokens, Token{Kind: TokHEEXCloseTag, Start: i, End: i + 2, Line: line})
 				i += len(skipUntilCloseTag)
-				// trim off leading "</" and trailing ">"
-				tagStack.leave(skipUntilCloseTag[2 : len(skipUntilCloseTag)-1])
+				tagStack.leave()
 				skipUntilCloseTag = nil
 			} else if i+1 < len(source) && ch == '<' && source[i+1] == '%' {
 				i += 2
@@ -1211,9 +1208,8 @@ func TokenizeHeex(source []byte) TokenResult {
 				} else if source[i] == '/' {
 					i++
 					tokens = append(tokens, Token{Kind: TokHEEXCloseTag, Start: i - 2, End: i, Line: line})
-					var name []byte
-					i, line, name = scanTagName(i, line, &tokens)
-					tagStack.leave(name)
+					i, line, _ = scanTagName(i, line, &tokens)
+					tagStack.leave()
 					if i < len(source) && source[i] == '>' {
 						i++
 					}

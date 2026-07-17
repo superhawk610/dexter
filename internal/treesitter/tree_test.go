@@ -73,3 +73,68 @@ end`
 		t.Errorf("expected %#v to end at position (Row: %d, Col: %d), got (Row: %d, Col: %d)", text, 0, 0, ep.Row, ep.Column)
 	}
 }
+
+func TestTree_NestingRules(t *testing.T) {
+	src := []byte(`def render(assigns) do
+  ~H"""
+  <%= cond do %>
+    <% one() -> %>
+      bar
+    <% true -> %>
+      oops
+  <% end %>
+
+  <%= if two() do %>
+    hello!
+  <% end
+    three() %>
+
+  <script><%= four() %>{five()}</script>
+  <style><%= six() %>{seven()}</style>
+  <div phx-no-curly-interpolation><%= eight() %>{nine()}</div>
+  <.foo phx-no-curly-interpolation><% ten() %>{eleven()}</.foo>
+  """
+end`)
+
+	tree := NewTree(src)
+	branches := slices.Collect(maps.Values(tree.Branches))
+	if len(branches) > 1 {
+		t.Fatalf("expected root tree to have a single branch but got %d", len(branches))
+	}
+
+	// move into HEEX tree
+	tree = branches[0]
+	exprs := map[string]bool{}
+	for _, branch := range tree.Branches {
+		exprs[branch.TrunkNode().Utf8Text(src)] = true
+	}
+
+	want := map[string]bool{
+		"cond do":          true,
+		"one() ->":         true,
+		"true ->":          true,
+		"end":              true,
+		"if two() do":      true,
+		"end\n    three()": true,
+		"four()":           true,
+		"five()":           false,
+		"six()":            true,
+		"seven()":          false,
+		"eight()":          true,
+		"nine()":           false,
+		"ten()":            true,
+		"eleven()":         false,
+	}
+	for text, shouldParse := range want {
+		if shouldParse && !exprs[text] {
+			t.Errorf("expected %+v to be parsed but it was not", exprs)
+		} else if !shouldParse && exprs[text] {
+			t.Errorf("expected %+v not to be parsed but it was", exprs)
+		}
+		delete(exprs, text)
+	}
+
+	for text, _ := range exprs {
+		t.Errorf("unexpected expression parsed: %+v", text)
+	}
+}
