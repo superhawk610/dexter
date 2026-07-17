@@ -258,8 +258,9 @@ func parseTextFromTokens(path string, source []byte, tokens []Token) ([]Definiti
 			TokCharLiteral, TokAtom, TokNumber, TokOther,
 			TokDot, TokColon, TokOpenParen, TokCloseParen,
 			TokOpenBracket, TokCloseBracket, TokOpenBrace, TokCloseBrace,
-			TokOpenAngle, TokCloseAngle, TokBackslash, TokRightArrow,
-			TokLeftArrow, TokAssoc, TokDoubleColon, TokComma, TokWhen:
+			TokOpenAngle, TokCloseAngle, TokHEEXOpenExpr, TokHEEXCloseExpr,
+			TokBackslash, TokRightArrow, TokLeftArrow, TokAssoc, TokDoubleColon,
+			TokComma, TokWhen:
 			i++
 			continue
 
@@ -648,46 +649,45 @@ func parseTextFromTokens(path string, source []byte, tokens []Token) ([]Definiti
 
 		case TokIdent:
 			cm := currentModule()
-			if cm != "" {
-				isHEEXFunction := i > 1 && tokens[i-1].Kind == TokDot &&
+			if cm != "" && len(injectors) > 0 {
+				isStatementStart := i == 0 ||
+					tokens[i-1].Kind == TokEOL ||
+					tokens[i-1].Kind == TokComment ||
+					tokens[i-1].Kind == TokHEEXOpenExpr
+				// we only need to recognize bare function components e.g. "<.foo />" here since module-prefixed
+				// components e.g. "<Foo.bar />" are handled by the TokModule case earlier in the switch statement
+				isHEEXComponent := i > 1 &&
+					tokens[i-1].Kind == TokDot &&
 					(tokens[i-2].Kind == TokHEEXOpenTag || tokens[i-2].Kind == TokHEEXCloseTag)
-				if isHEEXFunction {
+				if isStatementStart || isHEEXComponent {
 					name := tokenText(tok)
-					refs = append(refs, Reference{Module: cm, Function: name, Line: tok.Line, FilePath: path, Kind: "call"})
-					i++
-					continue
-				}
+					emit := !elixirKeyword[name]
 
-				if len(injectors) > 0 {
-					isStatementStart := i == 0 || tokens[i-1].Kind == TokEOL || tokens[i-1].Kind == TokComment
-					if isStatementStart {
-						name := tokenText(tok)
-						if !elixirKeyword[name] {
-							emit := false
-							j := i + 1
-							if j < n {
-								switch tokens[j].Kind {
-								case TokDo:
-									// macro_name do
-									emit = true
-								case TokOpenParen:
-									// macro_name(...)
-									emit = true
-								case TokAtom:
-									// macro_name :atom
-									emit = true
-								default:
-									// Scan forward to see if a block-opening `do` follows the
-									// arguments, respecting bracket depth and statement boundaries.
-									_, _, hasDo := ScanForwardToMacroCallBlockDo(tokens, n, j)
-									emit = hasDo
-								}
+					if emit && isStatementStart {
+						j := i + 1
+						if j < n {
+							switch tokens[j].Kind {
+							case TokDo:
+								// macro_name do
+								emit = true
+							case TokOpenParen:
+								// macro_name(...)
+								emit = true
+							case TokAtom:
+								// macro_name :atom
+								emit = true
+							default:
+								// Scan forward to see if a block-opening `do` follows the
+								// arguments, respecting bracket depth and statement boundaries.
+								_, _, hasDo := ScanForwardToMacroCallBlockDo(tokens, n, j)
+								emit = hasDo
 							}
-							if emit {
-								for mod := range injectors {
-									refs = append(refs, Reference{Module: mod, Function: name, Line: tok.Line, FilePath: path, Kind: "call"})
-								}
-							}
+						}
+					}
+
+					if emit {
+						for mod := range injectors {
+							refs = append(refs, Reference{Module: mod, Function: name, Line: tok.Line, FilePath: path, Kind: "call"})
 						}
 					}
 				}
@@ -717,10 +717,11 @@ func parseTextFromTokens(path string, source []byte, tokens []Token) ([]Definiti
 
 			extractModuleRefs(lineStart, lineEnd)
 
-			// Check for pipe calls on this line
+			// Check for pipe calls and HEEX function components on this line
 			if currentModule() != "" && len(injectors) > 0 {
 				for j := lineStart; j < lineEnd; j++ {
-					if tokens[j].Kind == TokPipe {
+					switch tokens[j].Kind {
+					case TokPipe:
 						pj := nextSig(j + 1)
 						if pj < lineEnd && tokens[pj].Kind == TokIdent {
 							name := tokenText(tokens[pj])
@@ -730,6 +731,20 @@ func parseTextFromTokens(path string, source []byte, tokens []Token) ([]Definiti
 								}
 							}
 						}
+
+						// we only need to check for bare HEEX function components e.g. "<.foo />", as module-prefixed
+						// calls e.g. "<Foo.bar />" are already handled by `extractModuleRefs` above
+					case TokHEEXOpenTag, TokHEEXCloseTag:
+						if j+2 <= lineEnd && tokens[j+1].Kind == TokDot && tokens[j+2].Kind == TokIdent {
+							name := tokenText(tokens[j+2])
+							if !elixirKeyword[name] {
+								for mod := range injectors {
+									refs = append(refs, Reference{Module: mod, Function: name, Line: triggerLine, FilePath: path, Kind: "call"})
+								}
+							}
+						}
+
+					default:
 					}
 				}
 			}

@@ -68,6 +68,8 @@ const (
 	TokPercent                        // %
 	TokHEEXOpenTag                    // <
 	TokHEEXCloseTag                   // </
+	TokHEEXOpenExpr                   // { or <% or <%=
+	TokHEEXCloseExpr                  // } or %>
 	TokNumber                         // integer or float literal
 	TokComment                        // # to end of line
 	TokEOL                            // newline
@@ -250,15 +252,19 @@ func tokenizeUntil(source, opener, terminator []byte) (int, int, bool, TokenResu
 				start := i
 				startLine := line
 				i += 3 // consume opening """
+				tokens = append(tokens, Token{Kind: TokHeredoc, Start: start, End: -1, Line: startLine})
+				tokenIdx := len(tokens) - 1
 				// scan to closing """ on its own line
 				i, line, _ = scanHeredocContent(source, i, line, '"', &lineStarts, &tokens)
-				tokens = append(tokens, Token{Kind: TokHeredoc, Start: start, End: i, Line: startLine})
+				tokens[tokenIdx].End = i
 			} else {
 				start := i
 				startLine := line
 				i++ // consume opening "
+				tokens = append(tokens, Token{Kind: TokString, Start: start, End: -1, Line: startLine})
+				tokenIdx := len(tokens) - 1
 				i, line = scanStringContent(source, i, line, '"', &lineStarts, &tokens)
-				tokens = append(tokens, Token{Kind: TokString, Start: start, End: i, Line: startLine})
+				tokens[tokenIdx].End = i
 			}
 
 		case ch == '\'':
@@ -267,14 +273,18 @@ func tokenizeUntil(source, opener, terminator []byte) (int, int, bool, TokenResu
 				start := i
 				startLine := line
 				i += 3 // consume opening '''
+				tokens = append(tokens, Token{Kind: TokHeredoc, Start: start, End: -1, Line: startLine})
+				tokenIdx := len(tokens) - 1
 				i, line, _ = scanHeredocContent(source, i, line, '\'', &lineStarts, &tokens)
-				tokens = append(tokens, Token{Kind: TokHeredoc, Start: start, End: i, Line: startLine})
+				tokens[tokenIdx].End = i
 			} else {
 				start := i
 				startLine := line
 				i++ // consume opening '
+				tokens = append(tokens, Token{Kind: TokString, Start: start, End: -1, Line: startLine})
+				tokenIdx := len(tokens) - 1
 				i, line = scanStringContent(source, i, line, '\'', &lineStarts, &tokens)
-				tokens = append(tokens, Token{Kind: TokString, Start: start, End: i, Line: startLine})
+				tokens[tokenIdx].End = i
 			}
 
 		case ch == '~':
@@ -297,15 +307,19 @@ func tokenizeUntil(source, opener, terminator []byte) (int, int, bool, TokenResu
 				start := i
 				startLine := line
 				i += 2 // consume :"
+				tokens = append(tokens, Token{Kind: TokAtom, Start: start, End: -1, Line: startLine})
+				tokenIdx := len(tokens) - 1
 				i, line = scanStringContent(source, i, line, '"', &lineStarts, &tokens)
-				tokens = append(tokens, Token{Kind: TokAtom, Start: start, End: i, Line: startLine})
+				tokens[tokenIdx].End = i
 			} else if i+1 < len(source) && source[i+1] == '\'' {
 				// Atom with quoted charlist: :'...'
 				start := i
 				startLine := line
 				i += 2 // consume :'
+				tokens = append(tokens, Token{Kind: TokAtom, Start: start, End: -1, Line: startLine})
+				tokenIdx := len(tokens) - 1
 				i, line = scanStringContent(source, i, line, '\'', &lineStarts, &tokens)
-				tokens = append(tokens, Token{Kind: TokAtom, Start: start, End: i, Line: startLine})
+				tokens[tokenIdx].End = i
 			} else if i+1 < len(source) && (isLower(source[i+1]) || source[i+1] == '_' || isUpperAtomStart(source, i+1)) {
 				start := i
 				i++ // consume ':'
@@ -598,6 +612,7 @@ func scanStringContent(source []byte, i, line int, delim byte, lineStarts *[]int
 			line++
 			i++
 			*lineStarts = append(*lineStarts, i)
+			fmt.Printf("scanStringContent added lineStart at %d\n", i)
 		} else if ch == '\\' && i+1 < len(source) {
 			if source[i+1] == '\n' {
 				line++
@@ -630,7 +645,7 @@ func scanInterpolation(source []byte, i, line int, lineStarts *[]int, tokens *[]
 			*tokens = append(*tokens, Token{Kind: t.Kind, Start: t.Start + start, End: t.End + start, Line: t.Line + startLine - 1})
 		}
 	}
-	for lineStart := range result.LineStarts[1:] {
+	for _, lineStart := range result.LineStarts[1:] {
 		*lineStarts = append(*lineStarts, lineStart+start)
 	}
 
@@ -944,16 +959,20 @@ func TokenizeHeex(source []byte) TokenResult {
 	}
 
 	scanInterpolation := func(i, line int, opener, terminator string, tokens *[]Token) (int, int) {
+		openerStart := i - len(opener)
+
+		// consume "=" output indicator from "<%=" special form prefix
+		if opener == "<%" && i < len(source) && source[i] == '=' {
+			i++
+		}
+
+		*tokens = append(*tokens, Token{Kind: TokHEEXOpenExpr, Start: openerStart, End: i, Line: line})
+
 		start := i
 		startLine := line
 
-		var opener_ []byte
-		if opener != "" {
-			opener_ = []byte(opener)
-		}
-
 		// lineStarts has already been updated during heredoc scanning
-		i_, line_, terminated, result := tokenizeUntil(source[start:], opener_, []byte(terminator))
+		i_, line_, terminated, result := tokenizeUntil(source[start:], []byte(opener), []byte(terminator))
 		for _, t := range result.Tokens {
 			if t.Kind != TokEOF {
 				*tokens = append(*tokens, Token{Kind: t.Kind, Start: t.Start + start, End: t.End + start, Line: t.Line + startLine - 1})
@@ -965,6 +984,7 @@ func TokenizeHeex(source []byte) TokenResult {
 
 		if terminated {
 			i += len(terminator)
+			*tokens = append(*tokens, Token{Kind: TokHEEXCloseExpr, Start: i - len(terminator), End: i, Line: line})
 		}
 
 		return i, line
@@ -1155,15 +1175,10 @@ func TokenizeHeex(source []byte) TokenResult {
 				// trim off leading "</" and trailing ">"
 				tagStack.leave(skipUntilCloseTag[2 : len(skipUntilCloseTag)-1])
 				skipUntilCloseTag = nil
-				// EEx interpolation (<% .. %> and <%= .. %>) are still active within script/style tags
 			} else if i+1 < len(source) && ch == '<' && source[i+1] == '%' {
 				i += 2
-				// consume "=" output indicator from "<%=" special form prefix
-				if i < len(source) && source[i] == '=' {
-					i++
-				}
-				// NOTE: nested <% %> are not supported, so don't pass an opener sequence to `scanInterpolation`
-				i, line = scanInterpolation(i, line, "", "%>", &tokens)
+				// EEx interpolation (<% .. %> and <%= .. %>) are still active within script/style tags
+				i, line = scanInterpolation(i, line, "<%", "%>", &tokens)
 			} else {
 				i++
 			}
@@ -1190,13 +1205,8 @@ func TokenizeHeex(source []byte) TokenResult {
 						i, line = scanComment("--%>", i, line, &lineStarts)
 						tokens = append(tokens, Token{Kind: TokComment, Start: start, End: i, Line: startLine})
 					} else if i < len(source) {
-						// consume "=" output indicator from "<%=" special form prefix
-						if source[i] == '=' {
-							i++
-						}
-						// EEX interpolation "<%"
-						// NOTE: nested <% %> are not supported, so don't pass an opener sequence to `scanInterpolation`
-						i, line = scanInterpolation(i, line, "", "%>", &tokens)
+						// EEX interpolation "<%" or "<%="
+						i, line = scanInterpolation(i, line, "<%", "%>", &tokens)
 					}
 				} else if source[i] == '/' {
 					i++

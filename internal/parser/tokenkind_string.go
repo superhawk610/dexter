@@ -61,16 +61,18 @@ func _() {
 	_ = x[TokPercent-50]
 	_ = x[TokHEEXOpenTag-51]
 	_ = x[TokHEEXCloseTag-52]
-	_ = x[TokNumber-53]
-	_ = x[TokComment-54]
-	_ = x[TokEOL-55]
-	_ = x[TokEOF-56]
-	_ = x[TokOther-57]
+	_ = x[TokHEEXOpenExpr-53]
+	_ = x[TokHEEXCloseExpr-54]
+	_ = x[TokNumber-55]
+	_ = x[TokComment-56]
+	_ = x[TokEOL-57]
+	_ = x[TokEOF-58]
+	_ = x[TokOther-59]
 }
 
-const _TokenKind_name = "TokDefmoduleTokDefTokDefpTokDefmacroTokDefmacropTokDefguardTokDefguardpTokDefdelegateTokDefprotocolTokDefimplTokDefstructTokDefexceptionTokAliasTokImportTokUseTokRequireTokDoTokEndTokFnTokWhenTokIdentTokModuleTokAttrTokAttrDocTokAttrSpecTokAttrTypeTokAttrBehaviourTokAttrCallbackTokStringTokHeredocTokSigilTokCharLiteralTokAtomTokDotTokCommaTokColonTokOpenParenTokCloseParenTokOpenBracketTokCloseBracketTokOpenBraceTokCloseBraceTokOpenAngleTokCloseAngleTokPipeTokBackslashTokRightArrowTokLeftArrowTokAssocTokDoubleColonTokPercentTokHEEXOpenTagTokHEEXCloseTagTokNumberTokCommentTokEOLTokEOFTokOther"
+const _TokenKind_name = "TokDefmoduleTokDefTokDefpTokDefmacroTokDefmacropTokDefguardTokDefguardpTokDefdelegateTokDefprotocolTokDefimplTokDefstructTokDefexceptionTokAliasTokImportTokUseTokRequireTokDoTokEndTokFnTokWhenTokIdentTokModuleTokAttrTokAttrDocTokAttrSpecTokAttrTypeTokAttrBehaviourTokAttrCallbackTokStringTokHeredocTokSigilTokCharLiteralTokAtomTokDotTokCommaTokColonTokOpenParenTokCloseParenTokOpenBracketTokCloseBracketTokOpenBraceTokCloseBraceTokOpenAngleTokCloseAngleTokPipeTokBackslashTokRightArrowTokLeftArrowTokAssocTokDoubleColonTokPercentTokHEEXOpenTagTokHEEXCloseTagTokHEEXOpenExprTokHEEXCloseExprTokNumberTokCommentTokEOLTokEOFTokOther"
 
-var _TokenKind_index = [...]uint16{0, 12, 18, 25, 36, 48, 59, 71, 85, 99, 109, 121, 136, 144, 153, 159, 169, 174, 180, 185, 192, 200, 209, 216, 226, 237, 248, 264, 279, 288, 298, 306, 320, 327, 333, 341, 349, 361, 374, 388, 403, 415, 428, 440, 453, 460, 472, 485, 497, 505, 519, 529, 543, 558, 567, 577, 583, 589, 597}
+var _TokenKind_index = [...]uint16{0, 12, 18, 25, 36, 48, 59, 71, 85, 99, 109, 121, 136, 144, 153, 159, 169, 174, 180, 185, 192, 200, 209, 216, 226, 237, 248, 264, 279, 288, 298, 306, 320, 327, 333, 341, 349, 361, 374, 388, 403, 415, 428, 440, 453, 460, 472, 485, 497, 505, 519, 529, 543, 558, 573, 589, 598, 608, 614, 620, 628}
 
 func (i TokenKind) String() string {
 	idx := int(i) - 0

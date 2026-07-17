@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -2042,27 +2043,31 @@ func TestParseFile_CharLiteralDoesNotConfuseStringBlanking(t *testing.T) {
 
 func TestParseFile_InterpolationDoesNotConfuseRefExtraction(t *testing.T) {
 	// Bug 2: string interpolation with nested quotes containing module refs
-	path := writeTempFile(t, "defmodule MyApp.Foo do\n  def bar do\n    x = \"hello #{Real.Module.call(\\\"arg\\\"}\"\n    Other.Module.work()\n  end\nend\n")
+	// [2026-07-17] Update: string interpolation is now tokenized and emits references
+	path := writeTempFile(t, `defmodule MyApp.Foo do
+  def bar do
+    x = "hello #{Real.Module.call(\"arg\")}"
+    Other.Module.work()
+  end
+end
+`)
 
 	_, refs, err := ParseFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	for _, r := range refs {
-		if r.Module == "Real.Module" {
-			t.Errorf("should not extract refs from inside string interpolation, got %+v", r)
-		}
-	}
-
-	found := false
+	found := 0
 	for _, r := range refs {
 		if r.Module == "Other.Module" && r.Function == "work" {
-			found = true
+			found++
+		}
+		if r.Module == "Real.Module" && r.Function == "call" {
+			found++
 		}
 	}
-	if !found {
-		t.Errorf("expected Other.Module.work ref; got refs: %+v", refs)
+	if found != 2 {
+		t.Errorf("expected Other.Module and Real.Module refs; got refs: %+v", refs)
 	}
 }
 
@@ -2558,6 +2563,80 @@ end
 	}
 	if setupCount < 2 {
 		t.Errorf("expected 2 bare macro call refs for setup, got %d; refs: %+v", setupCount, callRefs)
+	}
+}
+
+func TestParseFile_HEEXReferences(t *testing.T) {
+	path := writeTempFile(t, `defmodule MyAppWeb.PageLive do
+	import MyAppWeb.Components
+
+	# single-line def should generate reference
+  def comp, do: ~H"<.icon />"
+
+  # so should module attribute
+  @attr ~H"<.icon></.icon>"
+
+  def greeting do
+    ~H"""
+    <p id={component_id()}>Hello, world!</p>
+    <.icon />
+    <.icon></.icon>
+    <MyAppWeb.Components.icon />
+    <MyAppWeb.Components.icon></MyAppWeb.Components.icon>
+    """
+  end
+end
+`)
+
+	_, refs, err := ParseFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	calls := map[string][]int{}
+	for _, r := range refs {
+		if r.Kind == "call" {
+			mf := r.Module + "." + r.Function
+			calls[mf] = append(calls[mf], r.Line)
+		}
+	}
+
+	want := map[string][]int{
+		"MyAppWeb.Components.icon":         {5, 8, 8, 13, 14, 14, 15, 16, 16},
+		"MyAppWeb.Components.component_id": {12},
+	}
+	for f, ll := range want {
+		if !slices.Equal(calls[f], ll) {
+			t.Errorf("expected %s component references %v, got %v", f, ll, calls[f])
+		}
+	}
+}
+
+func TestParseFile_HEEXNoInjectors(t *testing.T) {
+	// same input module as `TestParseFile_HEEXReferences`, but without `import` injector;
+	// explicit `<Module.function />` components also omitted since they always emit refs
+	path := writeTempFile(t, `defmodule MyAppWeb.PageLive do
+  def comp, do: ~H"<.icon />"
+
+  @attr ~H"<.icon></.icon>"
+
+  def greeting do
+    ~H"""
+    <p id={component_id()}>Hello, world!</p>
+    <.icon />
+    <.icon></.icon>
+    """
+  end
+end
+`)
+
+	_, refs, err := ParseFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(refs) > 0 {
+		t.Errorf("expected no references for module without injectors, got %v", refs)
 	}
 }
 
