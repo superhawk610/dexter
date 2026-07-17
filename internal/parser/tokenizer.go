@@ -612,7 +612,6 @@ func scanStringContent(source []byte, i, line int, delim byte, lineStarts *[]int
 			line++
 			i++
 			*lineStarts = append(*lineStarts, i)
-			fmt.Printf("scanStringContent added lineStart at %d\n", i)
 		} else if ch == '\\' && i+1 < len(source) {
 			if source[i+1] == '\n' {
 				line++

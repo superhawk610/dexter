@@ -134,7 +134,7 @@ end`)
 		delete(exprs, text)
 	}
 
-	for text, _ := range exprs {
+	for text := range exprs {
 		t.Errorf("unexpected expression parsed: %+v", text)
 	}
 }

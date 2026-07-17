@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -3408,8 +3409,6 @@ func TestReferences_HEEXNestedReference(t *testing.T) {
 	server, cleanup := setupTestServer(t)
 	defer cleanup()
 
-	// Nested module: defmodule MoneyResponse inside Money creates
-	// MyApp.Money.MoneyResponse, but the defmodule line says just "MoneyResponse"
 	src := `defmodule App do
 	use Phoenix.LiveView
 
@@ -3418,7 +3417,7 @@ func TestReferences_HEEXNestedReference(t *testing.T) {
 	def render(assigns) do
     ~H"""
     <.foo />
-    <MyApp.foo />
+    <App.foo />
     """
 	end
 end
@@ -3428,24 +3427,32 @@ end
 	uri := "file://" + filepath.Join(server.projectRoot, "lib", "app.ex")
 	server.docs.Set(uri, src)
 
-	// Go-to-references on "foo" in the <MyApp.foo /> component (line 9, col 11)
-	locs := referencesAt(t, server, uri, 8, 11)
-	if len(locs) == 0 {
-		t.Fatal("expected references for function MyApp.foo")
+	tests := []struct {
+		src  string
+		line int
+		col  int
+	}{
+		// Go-to-references on "foo" in the <App.foo /> component (line 9, col 9)
+		{src: "<App.foo />", line: 9, col: 9},
+		// Go-to-references on "foo" in the <.foo /> line (line 8, col 6)
+		{src: "<.foo />", line: 8, col: 6},
 	}
-	if locs[0].Range.Start.Line != 8 {
-		t.Fatalf("expected reference on line 8, got line %d", locs[0].Range.Start.Line)
-	}
+	for _, tt := range tests {
 
-	// Go-to-references on "foo" in the <.foo /> line (line 8, col 6)
-	locs = referencesAt(t, server, uri, 7, 6)
-	if len(locs) == 0 {
-		t.Fatal("expected references for function .foo")
-	}
-	if locs[0].Range.Start.Line != 7 {
-		t.Fatalf("expected reference on line 7, got line %d", locs[0].Range.Start.Line)
-	}
+		locs := referencesAt(t, server, uri, uint32(tt.line-1), uint32(tt.col))
+		if len(locs) == 0 {
+			t.Fatalf("expected references for function %s", tt.src)
+		}
 
+		lines := []uint32{}
+		for _, loc := range locs {
+			lines = append(lines, loc.Range.Start.Line)
+		}
+		slices.Sort(lines)
+		if !slices.Equal(lines, []uint32{7, 8}) {
+			t.Fatalf("expected reference on lines 7 and 8, got lines %v", lines)
+		}
+	}
 }
 
 func TestDefinition_QualifiedCallOnNestedModule(t *testing.T) {

@@ -1952,8 +1952,18 @@ func FindBareFunctionCalls(text string, functionName string) []int {
 			continue
 		}
 
+		dotPrefixed := i > 0 && tokens[i-1].Kind == parser.TokDot
+
+		// Check this is a HEEX function component e.g. "<.foo />"
+		heexFunction := dotPrefixed && i > 1 &&
+			(tokens[i-2].Kind == parser.TokHEEXOpenTag || tokens[i-2].Kind == parser.TokHEEXCloseTag)
+		if heexFunction {
+			seenLines[tok.Line] = true
+			continue
+		}
+
 		// Check this is a bare call (not preceded by dot)
-		if i > 0 && tokens[i-1].Kind == parser.TokDot {
+		if dotPrefixed {
 			continue
 		}
 
